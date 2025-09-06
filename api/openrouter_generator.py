@@ -40,7 +40,7 @@ class OpenRouterGenerator:
     
     def generate_answer(self, question: str, retrieved_docs: List[str]) -> Dict[str, any]:
         """
-        Generate answer using OpenRouter with retrieved context
+        Generate answer using OpenRouter with retrieved context and retry logic
         
         Args:
             question: User question
@@ -52,57 +52,76 @@ class OpenRouterGenerator:
         if self.use_mock:
             return self._generate_mock_answer(question, retrieved_docs)
         
-        try:
-            # Prepare context from retrieved documents
-            context = self._prepare_context(retrieved_docs)
-            
-            # Create prompt
-            prompt = self._create_prompt(question, context)
-            
-            # Call OpenRouter API
-            response = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "http://localhost:8000",  # Optional: for tracking
-                    "X-Title": "Trustworthy LLM API"  # Optional: for tracking
-                },
-                json={
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": "You are a helpful assistant that answers questions based on the provided context. If the context doesn't contain enough information to answer the question, say so."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "max_tokens": self.max_tokens,
-                    "temperature": self.temperature
-                },
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                answer = data["choices"][0]["message"]["content"].strip()
+        # Retry logic for timeouts
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                # Prepare context from retrieved documents
+                context = self._prepare_context(retrieved_docs)
                 
-                # Extract usage info if available
-                usage = data.get("usage", {})
+                # Create prompt
+                prompt = self._create_prompt(question, context)
                 
-                return {
-                    "answer": answer,
-                    "model": self.model,
-                    "usage": usage,
-                    "context_used": len(retrieved_docs),
-                    "method": "openrouter_api",
-                    "provider": "openrouter"
-                }
-            else:
-                print(f"❌ OpenRouter API error: {response.status_code} - {response.text}")
-                return self._generate_mock_answer(question, retrieved_docs)
+                # Call OpenRouter API with longer timeout
+                timeout = 60 if attempt == 0 else 90  # Increase timeout on retries
+                response = requests.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "http://localhost:8000",  # Optional: for tracking
+                        "X-Title": "Trustworthy LLM API"  # Optional: for tracking
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": "You are a helpful assistant that answers questions based on the provided context. If the context doesn't contain enough information to answer the question, say so."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "max_tokens": self.max_tokens,
+                        "temperature": self.temperature
+                    },
+                    timeout=timeout
+                )
                 
-        except Exception as e:
-            print(f"❌ Error calling OpenRouter API: {e}")
-            print("   Falling back to mock response")
-            return self._generate_mock_answer(question, retrieved_docs)
+                if response.status_code == 200:
+                    data = response.json()
+                    answer = data["choices"][0]["message"]["content"].strip()
+                    
+                    # Extract usage info if available
+                    usage = data.get("usage", {})
+                    
+                    return {
+                        "answer": answer,
+                        "model": self.model,
+                        "usage": usage,
+                        "context_used": len(retrieved_docs),
+                        "method": "openrouter_api",
+                        "provider": "openrouter"
+                    }
+                elif response.status_code == 408 and attempt < max_retries:
+                    print(f"⚠️  OpenRouter timeout (attempt {attempt + 1}/{max_retries + 1}), retrying...")
+                    continue
+                else:
+                    print(f"❌ OpenRouter API error: {response.status_code} - {response.text}")
+                    if attempt == max_retries:
+                        return self._generate_mock_answer(question, retrieved_docs)
+                    
+            except requests.exceptions.Timeout as e:
+                if attempt < max_retries:
+                    print(f"⚠️  Request timeout (attempt {attempt + 1}/{max_retries + 1}), retrying...")
+                    continue
+                else:
+                    print(f"❌ Request timeout after {max_retries + 1} attempts: {e}")
+                    return self._generate_mock_answer(question, retrieved_docs)
+            except Exception as e:
+                print(f"❌ Error calling OpenRouter API: {e}")
+                if attempt == max_retries:
+                    print("   Falling back to mock response")
+                    return self._generate_mock_answer(question, retrieved_docs)
+        
+        # Should not reach here, but just in case
+        return self._generate_mock_answer(question, retrieved_docs)
     
     def _prepare_context(self, retrieved_docs: List[str]) -> str:
         """Prepare context string from retrieved documents"""
@@ -129,19 +148,30 @@ Question: {question}
 Answer:"""
     
     def _generate_mock_answer(self, question: str, retrieved_docs: List[str]) -> Dict[str, any]:
-        """Generate mock answer when API is not available"""
-        # Simple mock that incorporates some context
+        """Generate mock answer when API is not available - improved to be more realistic"""
         if retrieved_docs:
-            # Extract some keywords from retrieved docs
-            context_words = []
-            for doc in retrieved_docs[:2]:  # Use first 2 docs
-                words = doc.split()[:10]  # First 10 words
-                context_words.extend(words)
-            
-            context_hint = " ".join(context_words[:5])  # First 5 words
-            answer = f"Based on the context about {context_hint}, here's an answer to: {question}"
+            # Try to extract a direct answer from the retrieved documents
+            for doc in retrieved_docs:
+                # Look for patterns that might contain answers
+                if ":" in doc and len(doc.split(":")) == 2:
+                    # Format like "Question: Answer" or "Topic: Information"
+                    parts = doc.split(":")
+                    if len(parts[1].strip()) > 10:  # Has substantial content
+                        answer = parts[1].strip()
+                        break
+                elif doc.startswith("A:") or doc.startswith("Answer:"):
+                    # Direct answer format
+                    answer = doc.split(":", 1)[1].strip()
+                    break
+                elif len(doc) > 20 and len(doc) < 200:  # Reasonable length for an answer
+                    answer = doc.strip()
+                    break
+            else:
+                # Fallback: use first document as answer
+                answer = retrieved_docs[0].strip()
         else:
-            answer = f"Generated answer to: {question}"
+            # Generic fallback
+            answer = f"I don't have enough information to answer '{question}' accurately."
         
         return {
             "answer": answer,

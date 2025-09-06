@@ -21,16 +21,16 @@ DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 # 1. Sentence encoder
 encoder = SentenceTransformer("all-MiniLM-L6-v2").to(DEVICE)
 
-# 2. Load GAT checkpoint (trained earlier)
-CKPT_PATH = os.path.join(os.path.dirname(__file__), "..", "gnn", "experiments", "best_gat.pt")
+# 2. Load GAT checkpoint (trained on master dataset)
+CKPT_PATH = os.path.join(os.path.dirname(__file__), "..", "gnn", "experiments", "best_gat_master.pt")
 ckpt = torch.load(CKPT_PATH, map_location=DEVICE)
 model = GAT(ckpt["in_dim"], ckpt["hidden_dim"], ckpt["out_dim"])
 model.load_state_dict(ckpt["state_dict"])
 model = model.to(DEVICE)
 model.eval()
 
-# 3. Initialize FAISS retriever with production dataset
-DATASET_PATH = os.path.join(os.path.dirname(__file__), "..", "gnn", "production_dataset.json")
+# 3. Initialize FAISS retriever with master dataset
+DATASET_PATH = os.path.join(os.path.dirname(__file__), "..", "gnn", "master_dataset.json")
 retriever = FAISSRetriever(documents_path=DATASET_PATH)
 
 # 4. Initialize LLM generator (try OpenRouter first, then OpenAI)

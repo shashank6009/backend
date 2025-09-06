@@ -18,10 +18,20 @@ class FAISSRetriever:
         self.documents = []
         self.index = None
         self.dimension = 384  # all-MiniLM-L6-v2 embedding dimension
+        self.index_built = False
         
+        # Check for cached index
         if documents_path and os.path.exists(documents_path):
-            self.load_documents(documents_path)
-            self.build_index()
+            self.index_cache_path = documents_path.replace('.json', '.faiss.idx')
+            if os.path.exists(self.index_cache_path):
+                print(f"Loading cached FAISS index → {self.index_cache_path}")
+                self.index = faiss.read_index(self.index_cache_path)
+                self.index_built = True
+                # Still need to load documents for metadata
+                self.load_documents(documents_path)
+            else:
+                self.load_documents(documents_path)
+                self.build_index()
     
     def load_documents(self, documents_path: str):
         """Load documents from JSON file"""
@@ -63,27 +73,42 @@ class FAISSRetriever:
         print(f"Loaded {len(self.documents)} documents")
     
     def build_index(self):
-        """Build FAISS index from document embeddings"""
+        """Build FAISS index from document embeddings with batching"""
         if not self.documents:
             print("No documents to index")
             return
         
-        print("Building FAISS index...")
-        
-        # Encode all documents
-        texts = [doc["text"] for doc in self.documents]
-        embeddings = self.encoder.encode(texts, convert_to_tensor=False)
+        if self.index_built:
+            print("Index already built")
+            return
+            
+        print("Building FAISS index (batched)...")
         
         # Create FAISS index
         self.index = faiss.IndexFlatIP(self.dimension)  # Inner product (cosine similarity)
         
-        # Normalize embeddings for cosine similarity
-        faiss.normalize_L2(embeddings)
+        # Process in batches to avoid memory issues
+        batch_size = 1000
+        texts = [doc["text"] for doc in self.documents]
         
-        # Add embeddings to index
-        self.index.add(embeddings.astype('float32'))
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i:i + batch_size]
+            print(f"Processing batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
+            
+            # Encode batch
+            batch_embeddings = self.encoder.encode(batch_texts, convert_to_tensor=False)
+            
+            # Normalize embeddings for cosine similarity
+            faiss.normalize_L2(batch_embeddings)
+            
+            # Add to index
+            self.index.add(batch_embeddings.astype('float32'))
         
+        # Save index to cache
+        faiss.write_index(self.index, self.index_cache_path)
+        print(f"Saved FAISS index cache → {self.index_cache_path}")
         print(f"FAISS index built with {self.index.ntotal} vectors")
+        self.index_built = True
     
     def search(self, query: str, k: int = 5) -> List[Dict]:
         """
